@@ -21,12 +21,20 @@ const log = (msg: string, extra?: unknown) => console.log(`[bank ${new Date().to
 const app = express();
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
+// Chromium applies form-action to the redirect that follows a form post, so the
+// login form must be allowed to land on the OAuth client's redirect host.
+const formAction = [
+  "'self'",
+  ...config.allowedRedirectHosts.flatMap((h) =>
+    h === "localhost" || h === "127.0.0.1" ? [`http://${h}:*`, `https://${h}:*`] : [`https://${h}`, `https://*.${h}`],
+  ),
+].join(" ");
 app.use((_req, res, next) => {
   res.set({
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    "Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`,
   });
   next();
 });
