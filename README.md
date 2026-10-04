@@ -108,6 +108,23 @@ is about to expire and the same conversation renews it.
 Give accounts labels ("Everyday", "Joint expenses", "Mortgage") when Claude
 suggests them. Every tool accepts labels instead of ids.
 
+### Optional: several named people instead of one password
+
+By default one admin password guards the connector. To let a small team use
+one server without sharing a secret, switch sign-in to Google:
+
+1. In Google Cloud Console create an OAuth client (type *Web application*)
+   with the authorized redirect URI `https://YOUR-HOST/auth/google/callback`
+   (the status page shows the exact value).
+2. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and
+   `ALLOWED_EMAILS=anna@example.org,ben@example.org` and restart.
+
+The login page then shows *Sign in with Google*, the password form is off,
+and only the listed addresses get in. Each token remembers who signed in;
+take an address out of `ALLOWED_EMAILS` and that person's access stops at
+once, without logging anyone else out. Sign-in notifications name the person.
+The admin password is still needed for the first-run setup page.
+
 ## Going live with your own accounts
 
 Enable Banking's production environment normally requires a contract, but it

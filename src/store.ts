@@ -80,9 +80,13 @@ export interface AuthCode {
   resource?: string;
   scopes: string[];
   expires: number;
+  /** Email of the person who signed in (Google sign-in only). */
+  user?: string;
 }
 
 export interface Token {
+  /** Email of the person who signed in (Google sign-in only). */
+  user?: string;
   client_id: string;
   scopes: string[];
   expires: number;

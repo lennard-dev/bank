@@ -41,8 +41,8 @@ export function shell(title: string, body: string, opts: { kind?: Kind; pill?: s
   textarea{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:8px;resize:vertical}
   input[type=file]{padding:9px 12px;font-size:14px}
   input:focus,textarea:focus{outline:2px solid var(--ink);outline-offset:1px;border-color:transparent}
-  button{width:100%;margin-top:14px;font:inherit;font-weight:700;padding:13px 16px;border:0;border-radius:10px;background:var(--ink);color:var(--bg);cursor:pointer}
-  button:hover{opacity:.92}
+  button,a.button{display:block;box-sizing:border-box;text-align:center;text-decoration:none;width:100%;margin-top:14px;font:inherit;font-weight:700;padding:13px 16px;border:0;border-radius:10px;background:var(--ink);color:var(--bg);cursor:pointer}
+  button:hover,a.button:hover{opacity:.92}
   code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);border:1px solid var(--line);padding:6px 10px;border-radius:8px;display:inline-block;word-break:break-all}
   .copy{margin:14px 0 0}.copy p{margin:0 0 4px}
   .copyrow{display:flex;gap:8px;align-items:flex-start}.copyrow code{flex:1}
@@ -58,9 +58,18 @@ export function shell(title: string, body: string, opts: { kind?: Kind; pill?: s
 </div></body></html>`;
 }
 
-export function loginPage(opts: { requestId: string; clientName?: string; returnTo?: string; error?: string }): string {
+export function loginPage(opts: { requestId: string; clientName?: string; returnTo?: string; error?: string; google?: boolean }): string {
   const who = opts.clientName ? `<b>${esc(opts.clientName)}</b>` : "An app";
   const back = opts.returnTo ? `<p class="muted">After signing in you are sent back to <b>${esc(opts.returnTo)}</b>. Stop if that is not where you came from.</p>` : "";
+  if (opts.google) {
+    return shell(
+      "Allow access?",
+      `<p>${who} wants read-only access to the bank accounts on this server. It can see balances and transactions. It cannot move money.</p>${back}
+       <p>Sign in with the Google account your administrator added to the list.</p>
+       <a class="button" href="/auth/google?request=${encodeURIComponent(opts.requestId)}">Sign in with Google</a>`,
+      { kind: "neutral", pill: "Sign-in request" },
+    );
+  }
   return shell(
     "Allow access?",
     `<p>${who} wants read-only access to your bank accounts through this server. It can see balances and transactions. It cannot move money.</p>${back}
@@ -108,12 +117,13 @@ export function statusPage(input: { problems: string[]; mcpUrl: string; callback
     config.appName,
     `<p>Running. Two addresses to copy:</p>
      <p class="muted" style="margin-bottom:4px">Redirect URL for the application at Enable Banking</p><p><code>${esc(input.callbackUrl)}</code></p>
-     <p class="muted" style="margin-bottom:4px">Custom connector URL in Claude (sign in with the admin password)</p><p><code>${esc(input.mcpUrl)}</code></p>`,
+     <p class="muted" style="margin-bottom:4px">Custom connector URL in Claude (${config.googleLogin ? "sign in with an allowed Google account" : "sign in with the admin password"})</p><p><code>${esc(input.mcpUrl)}</code></p>
+     ${config.googleLogin ? `<p class="muted" style="margin-bottom:4px">Authorized redirect URI for the Google OAuth client</p><p><code>${esc(new URL("/auth/google/callback", config.baseUrl).href)}</code></p>` : ""}`,
     { kind: "ok", pill: "Running" },
   );
 }
 
-export const CONSENT_DESCRIPTION = `${config.appName} lets you ask Claude about your own accounts. It can read balances and transactions. It can never move money, and only you can use it. Revoke access at your bank at any time.`;
+export const CONSENT_DESCRIPTION = `${config.appName} lets you ask Claude about your own accounts. It can read balances and transactions. It can never move money, and only ${config.googleLogin ? "the people your organisation has named" : "you"} can use it. Revoke access at your bank at any time.`;
 
 export function setupPage(opts: { error?: string; values?: { app_id?: string; country?: string }; baseUrl?: string } = {}): string {
   const v = opts.values ?? {};

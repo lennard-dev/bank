@@ -70,6 +70,24 @@ export const config = {
   },
   adminPassword: env.ADMIN_PASSWORD ?? "",
   notifyWebhookUrl: env.NOTIFY_WEBHOOK_URL ?? "",
+  // Optional: several named people instead of one shared password. When a
+  // Google client id is set, sign-in goes through Google and only the listed
+  // addresses get in. Removing an address locks that person out at once.
+  get googleClientId(): string {
+    return env.GOOGLE_CLIENT_ID ?? "";
+  },
+  get googleClientSecret(): string {
+    return env.GOOGLE_CLIENT_SECRET ?? "";
+  },
+  get allowedEmails(): string[] {
+    return (env.ALLOWED_EMAILS ?? "")
+      .split(",")
+      .map((e) => e.trim().toLowerCase())
+      .filter(Boolean);
+  },
+  get googleLogin(): boolean {
+    return Boolean(env.GOOGLE_CLIENT_ID);
+  },
   // Hosts an OAuth client may send the sign-in back to. Stops a phishing link
   // from registering a client that redirects your authorization code elsewhere.
   allowedRedirectHosts: (env.ALLOWED_REDIRECT_HOSTS ?? "claude.ai,claude.com,localhost,127.0.0.1")
@@ -111,6 +129,10 @@ export function setupProblems(): string[] {
     }
   }
   if (!config.adminPasswordHash && !config.adminPassword) problems.push("Admin password is not set");
+  if (config.googleLogin) {
+    if (!config.googleClientSecret) problems.push("GOOGLE_CLIENT_SECRET is not set (needed with GOOGLE_CLIENT_ID)");
+    if (!config.allowedEmails.length) problems.push("ALLOWED_EMAILS is empty, so nobody could sign in with Google");
+  }
   if (!/^https?:\/\//.test(config.baseUrl)) problems.push("BASE_URL must start with http:// or https://");
   try {
     mkdirSync(config.dataDir, { recursive: true });

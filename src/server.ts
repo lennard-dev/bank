@@ -44,11 +44,16 @@ const mcpUrl = new URL("/mcp", baseUrl);
 const provider = new SingleUserProvider(store(), {
   onLogin: (e) => {
     const who = e.clientName ? ` for ${e.clientName}` : "";
+    const user = e.user ? ` by ${e.user}` : "";
     if (e.ok) {
-      log(`sign-in from ${e.ip}${who}`);
-      notify(`${config.appName}: new sign-in from ${e.ip}${who}. If this was not you, change ADMIN_PASSWORD now; that logs every client out.`);
+      log(`sign-in${user} from ${e.ip}${who}`);
+      notify(
+        e.user
+          ? `${config.appName}: ${e.user} signed in from ${e.ip}${who}. To remove someone, take their address out of ALLOWED_EMAILS; their access stops immediately.`
+          : `${config.appName}: new sign-in from ${e.ip}${who}. If this was not you, change ADMIN_PASSWORD now; that logs every client out.`,
+      );
     } else {
-      log(`failed sign-in from ${e.ip}${who} (${e.reason})`);
+      log(`failed sign-in${user} from ${e.ip}${who} (${e.reason})`);
     }
   },
 });
@@ -129,6 +134,22 @@ app.post("/login", express.urlencoded({ extended: false }), (req, res) => {
   if ("redirect" in result) return void res.redirect(302, result.redirect);
   if (result.requestId) return void res.status(401).type("html").send(loginPage({ requestId: result.requestId, error: result.error }));
   res.status(400).type("html").send(signInFailedPage(result.error));
+});
+
+// Google sign-in (only when GOOGLE_CLIENT_ID is set): the login page links
+// here, Google sends the browser back to the callback.
+app.get("/auth/google", (req, res) => {
+  const result = provider.googleStartUrl(String(req.query.request ?? ""));
+  if ("redirect" in result) return void res.redirect(302, result.redirect);
+  res.status(400).type("html").send(signInFailedPage(result.error));
+});
+
+app.get("/auth/google/callback", async (req, res) => {
+  const { code, state, error } = req.query as Record<string, string | undefined>;
+  if (error || !code || !state) return void res.status(400).type("html").send(signInFailedPage(error === "access_denied" ? "Google sign-in was cancelled." : "Google did not return a sign-in code. Go back to Claude and try again."));
+  const result = await provider.completeGoogleLogin(state, code, req.ip ?? "unknown");
+  if ("redirect" in result) return void res.redirect(302, result.redirect);
+  res.status(403).type("html").send(signInFailedPage(result.error));
 });
 
 // --- MCP endpoint (stateless: one transport per request) ---
