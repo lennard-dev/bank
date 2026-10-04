@@ -119,3 +119,99 @@ test("Google start URL is refused while Google sign-in is off", async () => {
   const r = provider.googleStartUrl("anything");
   assert.ok("error" in r);
 });
+
+/** Fake Google for group mode: token endpoint plus Cloud Identity group and membership lookups. */
+function groupGoogle(email: string, members: Set<string>, calls: string[]) {
+  let currentRequest = "";
+  const fetchImpl = (async (url: string, init?: { body?: URLSearchParams; headers?: Record<string, string> }) => {
+    calls.push(url);
+    const json = (status: number, body: unknown) => ({ ok: status < 300, status, json: async () => body });
+    if (url.startsWith("https://oauth2.googleapis.com/token")) {
+      const grant = init!.body!.get("grant_type");
+      if (grant === "refresh_token") return init!.body!.get("refresh_token") === "g-refresh" ? json(200, { access_token: "g-access-2" }) : json(400, { error: "invalid_grant" });
+      const token = idToken({ iss: "accounts.google.com", aud: CLIENT_ID, exp: Math.floor(Date.now() / 1000) + 300, nonce: sha256(`nonce:${currentRequest}`), email, email_verified: true });
+      return json(200, { id_token: token, access_token: "g-access", refresh_token: "g-refresh" });
+    }
+    if (url.includes("/groups:lookup")) return url.includes(encodeURIComponent("bank-access@europecares.org")) ? json(200, { name: "groups/abc123" }) : json(404, {});
+    if (url.includes("/groups/abc123/memberships:lookup")) {
+      const who = decodeURIComponent(new URL(url).searchParams.get("memberKey.id")!);
+      return members.has(who) ? json(200, { name: "groups/abc123/memberships/1" }) : json(404, {});
+    }
+    return json(500, {});
+  }) as unknown as typeof fetch;
+  return { fetchImpl, setRequest: (r: string) => (currentRequest = r) };
+}
+
+async function groupSetup(email: string, members: Set<string>) {
+  const calls: string[] = [];
+  const g = groupGoogle(email, members, calls);
+  const store = new Store(join(mkdtempSync(join(tmpdir(), "bank-")), "store.json"));
+  const provider = new SingleUserProvider(store, { fetch: g.fetchImpl });
+  const client = await provider.clientsStore.registerClient!({ redirect_uris: ["https://claude.ai/cb"], client_name: "Claude" });
+  const out = { body: "" };
+  const res = { status: () => res, type: () => res, send: (b: string) => ((out.body = b), res) } as unknown as import("express").Response;
+  await provider.authorize(client, { codeChallenge: "c", redirectUri: "https://claude.ai/cb" }, res);
+  const requestId = decodeURIComponent(/\/auth\/google\?request=([^"]+)"/.exec(out.body)![1]!);
+  g.setRequest(requestId);
+  return { provider, client, requestId, calls, store };
+}
+
+function withGroup<T>(fn: () => Promise<T>): Promise<T> {
+  process.env.GOOGLE_CLIENT_ID = CLIENT_ID;
+  process.env.GOOGLE_CLIENT_SECRET = "secret";
+  process.env.ALLOWED_GROUP = "Bank-Access@europecares.org";
+  return fn().finally(() => {
+    delete process.env.GOOGLE_CLIENT_ID;
+    delete process.env.GOOGLE_CLIENT_SECRET;
+    delete process.env.ALLOWED_GROUP;
+    delete process.env.ALLOWED_EMAILS;
+  });
+}
+
+test("Google group: members get in, the sign-in asks for offline group read access", () =>
+  withGroup(async () => {
+    const members = new Set(["silvia@europecares.org"]);
+    const { provider, client, requestId, store } = await groupSetup("silvia@europecares.org", members);
+    const start = provider.googleStartUrl(requestId);
+    assert.ok("redirect" in start);
+    const u = new URL(start.redirect);
+    assert.match(u.searchParams.get("scope")!, /cloud-identity\.groups\.readonly/);
+    assert.equal(u.searchParams.get("access_type"), "offline");
+
+    const done = await provider.completeGoogleLogin(requestId, "code", "1.1.1.1");
+    assert.ok("redirect" in done, JSON.stringify(done));
+    const tokens = await provider.exchangeAuthorizationCode(client, new URL(done.redirect).searchParams.get("code")!);
+    assert.deepEqual((await provider.verifyAccessToken(tokens.access_token)).extra, { user: "silvia@europecares.org" });
+    const refreshRecord = Object.values(store.data.oauth.tokens).find((t) => t.kind === "refresh")!;
+    assert.equal(refreshRecord.via, "group");
+    assert.equal(refreshRecord.google_refresh, "g-refresh");
+    assert.equal(Object.values(store.data.oauth.tokens).find((t) => t.kind === "access")!.google_refresh, undefined, "access tokens do not carry the Google refresh token");
+
+    const again = await provider.exchangeRefreshToken(client, tokens.refresh_token!);
+    assert.ok(again.access_token, "still a member: refresh works");
+  }));
+
+test("Google group: non-members are turned away and removal takes effect at the next refresh", () =>
+  withGroup(async () => {
+    const outsider = await groupSetup("abi@europecares.org", new Set(["silvia@europecares.org"]));
+    const refused = await outsider.provider.completeGoogleLogin(outsider.requestId, "code", "1.1.1.1");
+    assert.ok("error" in refused && /not in the group bank-access@europecares\.org/.test(refused.error));
+
+    const members = new Set(["julian@europecares.org"]);
+    const { provider, client, requestId } = await groupSetup("julian@europecares.org", members);
+    const done = await provider.completeGoogleLogin(requestId, "code", "1.1.1.1");
+    assert.ok("redirect" in done);
+    const tokens = await provider.exchangeAuthorizationCode(client, new URL(done.redirect).searchParams.get("code")!);
+    members.delete("julian@europecares.org");
+    await assert.rejects(provider.exchangeRefreshToken(client, tokens.refresh_token!), /removed/);
+    await assert.rejects(provider.exchangeRefreshToken(client, tokens.refresh_token!), /Invalid/, "the refresh token is gone");
+  }));
+
+test("Google group: ALLOWED_EMAILS still works alongside the group without a Cloud Identity call", () =>
+  withGroup(async () => {
+    process.env.ALLOWED_EMAILS = "lennard.everwien@europecares.org";
+    const { provider, requestId, calls } = await groupSetup("lennard.everwien@europecares.org", new Set());
+    const done = await provider.completeGoogleLogin(requestId, "code", "1.1.1.1");
+    assert.ok("redirect" in done);
+    assert.ok(!calls.some((c) => c.includes("cloudidentity")), "list members skip the group check");
+  }));

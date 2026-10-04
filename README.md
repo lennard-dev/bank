@@ -119,6 +119,15 @@ one server without sharing a secret, switch sign-in to Google:
 2. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and
    `ALLOWED_EMAILS=anna@example.org,ben@example.org` and restart.
 
+Instead of (or in addition to) a list, set `ALLOWED_GROUP=bank@example.org`
+to let every direct member of a Google Workspace group in. Then also enable
+the **Cloud Identity API** in the Google Cloud project and set the group's
+*Who can view members* to *Group members* or *Organisation*: the server asks
+Google with the person's own token, so they must be able to see the list.
+Membership is checked at sign-in and again whenever Claude refreshes its
+token (hourly), so removing someone from the group locks them out within an
+hour. Nested groups are not followed.
+
 The login page then shows *Sign in with Google*, the password form is off,
 and only the listed addresses get in. Each token remembers who signed in;
 take an address out of `ALLOWED_EMAILS` and that person's access stops at

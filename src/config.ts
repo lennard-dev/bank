@@ -85,6 +85,10 @@ export const config = {
       .map((e) => e.trim().toLowerCase())
       .filter(Boolean);
   },
+  /** Google group whose direct members may sign in, e.g. bank-access@example.org. Checked with Cloud Identity at sign-in and on every token refresh. */
+  get allowedGroup(): string {
+    return (env.ALLOWED_GROUP ?? "").trim().toLowerCase();
+  },
   get googleLogin(): boolean {
     return Boolean(env.GOOGLE_CLIENT_ID);
   },
@@ -131,7 +135,7 @@ export function setupProblems(): string[] {
   if (!config.adminPasswordHash && !config.adminPassword) problems.push("Admin password is not set");
   if (config.googleLogin) {
     if (!config.googleClientSecret) problems.push("GOOGLE_CLIENT_SECRET is not set (needed with GOOGLE_CLIENT_ID)");
-    if (!config.allowedEmails.length) problems.push("ALLOWED_EMAILS is empty, so nobody could sign in with Google");
+    if (!config.allowedEmails.length && !config.allowedGroup) problems.push("Neither ALLOWED_EMAILS nor ALLOWED_GROUP is set, so nobody could sign in with Google");
   }
   if (!/^https?:\/\//.test(config.baseUrl)) problems.push("BASE_URL must start with http:// or https://");
   try {

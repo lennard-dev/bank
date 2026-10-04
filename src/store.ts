@@ -82,11 +82,18 @@ export interface AuthCode {
   expires: number;
   /** Email of the person who signed in (Google sign-in only). */
   user?: string;
+  /** How that person got in: on ALLOWED_EMAILS, or as a member of ALLOWED_GROUP. */
+  via?: "list" | "group";
+  /** Google refresh token, kept to re-check group membership when Claude refreshes. */
+  google_refresh?: string;
 }
 
 export interface Token {
   /** Email of the person who signed in (Google sign-in only). */
   user?: string;
+  via?: "list" | "group";
+  /** Refresh tokens only: Google refresh token for re-checking group membership. */
+  google_refresh?: string;
   client_id: string;
   scopes: string[];
   expires: number;
