@@ -6,6 +6,8 @@ import { config } from "./config.ts";
 import { eb, EnableBankingError } from "./enablebanking.ts";
 import { store, type StoredAccount, type Watch } from "./store.ts";
 import { daysLeft, isoDate, simplifyBalances, simplifyTransaction, type SimpleTransaction } from "./data.ts";
+import type { Transaction } from "./enablebanking.ts";
+import { bankCall, blockedUntil, runSync, storeFetch } from "./sync.ts";
 
 export interface WatchEvent {
   watch_id: string;
@@ -49,7 +51,7 @@ export async function runWatches(opts: { force?: boolean } = {}): Promise<WatchR
   for (const [uid, watches] of byAccount) {
     const account = s.account(uid);
     if (!account) continue;
-    if (!opts.force && account.last_polled && Date.parse(account.last_polled) > dueBefore) {
+    if ((!opts.force && account.last_polled && Date.parse(account.last_polled) > dueBefore) || blockedUntil(account)) {
       run.skipped_accounts += 1;
       continue;
     }
@@ -131,19 +133,26 @@ async function checkAccount(account: StoredAccount, watches: Watch[]): Promise<W
   const needsTx = watches.some((w) => !w.rule.type.startsWith("balance_"));
 
   let booked: number | undefined;
-  if (needsBalance) booked = simplifyBalances(await eb.getBalances(account.uid)).booked;
+  if (needsBalance) booked = simplifyBalances(await bankCall(account, () => eb.getBalances(account.uid))).booked;
 
   const txs: SimpleTransaction[] = [];
   if (needsTx) {
     // Look back far enough to cover the oldest open "missing credit" watch, but at most 90 days.
     const oldest = Math.min(...watches.filter((w) => w.rule.type === "credit_missing_by").map((w) => Date.parse(w.created)), Date.now() - 3 * 86_400_000);
     const from = new Date(Math.max(oldest, Date.now() - 90 * 86_400_000)).toISOString().slice(0, 10);
+    const to = isoDate();
+    const raw: Transaction[] = [];
     let key: string | undefined;
-    do {
-      const pageData = await eb.getTransactionPage(account.uid, { dateFrom: from, dateTo: isoDate(), continuationKey: key });
-      txs.push(...pageData.transactions.map(simplifyTransaction));
-      key = pageData.continuation_key || undefined;
-    } while (key && txs.length < 2000);
+    await bankCall(account, async () => {
+      do {
+        const pageData = await eb.getTransactionPage(account.uid, { dateFrom: from, dateTo: to, continuationKey: key });
+        raw.push(...pageData.transactions);
+        key = pageData.continuation_key || undefined;
+      } while (key && raw.length < 2000);
+    });
+    txs.push(...raw.map(simplifyTransaction));
+    // A watch check is also a sync: store what was fetched, so the daily sync can skip this account.
+    if (!key) storeFetch(account, raw, from, to);
   }
 
   const events = evaluate(account, watches, booked, txs);
@@ -166,7 +175,12 @@ export function startWatcher(everyMinutes = 5): () => void {
       .then((r) => {
         if (r.events.length || r.errors.length) log(`checked ${r.checked_accounts}, events ${r.events.length}, errors ${r.errors.length}`, r.errors);
       })
-      .catch((err) => log("run failed", err));
+      .catch((err) => log("run failed", err))
+      .then(() => runSync())
+      .then((r) => {
+        if (r && (r.synced.length || r.errors.length)) log(`sync: ${r.synced.length} synced, ${r.errors.length} errors`, r.errors);
+      })
+      .catch((err) => log("sync failed", err));
   const timer = setInterval(tick, everyMinutes * 60_000);
   setTimeout(tick, 15_000).unref();
   return () => clearInterval(timer);

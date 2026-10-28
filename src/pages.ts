@@ -171,7 +171,7 @@ export const privacyPage = () =>
   shell(
     "Privacy",
     `<p>This server is operated by the person who deployed it, to access their own bank accounts. It is not offered as a service to anyone else.</p>
-     <p>Account identifiers and consent references from Enable Banking are stored on the server so the operator's assistant can fetch balances and transactions on request. Transactions and balances themselves are not stored. No data is shared with third parties and nothing is collected about visitors.</p>
+     <p>Account identifiers and consent references from Enable Banking are stored on the server so the operator's assistant can fetch balances and transactions. A copy of each linked account's transactions is kept on the same server, so questions can be answered without asking the bank every time; it is never shared. No data is shared with third parties and nothing is collected about visitors.</p>
      <p>The software is open source. Its authors do not operate this server, receive no data from it, and are not affiliated with Enable Banking, Anthropic or any bank.</p>`,
   );
 

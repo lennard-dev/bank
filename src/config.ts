@@ -105,6 +105,13 @@ export const config = {
   // Unattended polling for watches: PSD2 allows at most four account accesses
   // per day without the account holder present.
   pollIntervalHours: Number(env.POLL_INTERVAL_HOURS ?? 6),
+  // Background sync of each account into the local transaction copy. Accounts
+  // with an active watch are synced by the watch checks instead, so the two
+  // never add up beyond the PSD2 allowance.
+  syncIntervalHours: Number(env.SYNC_INTERVAL_HOURS ?? 24),
+  syncEnabled: (env.SYNC_ENABLED ?? "true").toLowerCase() !== "false",
+  /** How far back the bank is asked for on the first sync. Most banks refuse more than 90 days. */
+  syncLookbackDays: Number(env.SYNC_LOOKBACK_DAYS ?? 89),
   /** True when every secret came from the environment, so the setup page has nothing to do. */
   get lockedByEnv(): boolean {
     return Boolean(env.EB_APP_ID && (env.EB_PRIVATE_KEY || env.EB_PRIVATE_KEY_PATH) && (env.ADMIN_PASSWORD_HASH || env.ADMIN_PASSWORD));

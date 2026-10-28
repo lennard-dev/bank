@@ -4,8 +4,10 @@ import { z } from "zod";
 import { config } from "./config.ts";
 import { eb, EnableBankingError } from "./enablebanking.ts";
 import { store, type StoredAccount, type WatchRule } from "./store.ts";
-import { daysAgo, daysLeft, describeAccount, isoDate, simplifyBalances, simplifyTransaction } from "./data.ts";
+import { daysAgo, daysLeft, describeAccount, isoDate, round2, simplifyBalances } from "./data.ts";
 import { runWatches } from "./watcher.ts";
+import { rowsFromCsv, sortLedger, totals } from "./ledger.ts";
+import { BankBlockedError, bankCall, blockedUntil, earliestFetchable, fetchAll, ledgerFor, storeFetch, syncAccount } from "./sync.ts";
 
 const MAX_CONSENT_DAYS = 180;
 
@@ -32,8 +34,9 @@ export function resolveAccount(ref: string): StoredAccount {
 async function withAccount<T>(ref: string, fn: (a: StoredAccount) => Promise<T>): Promise<T> {
   const account = resolveAccount(ref);
   try {
-    return await fn(account);
+    return await bankCall(account, () => fn(account));
   } catch (err) {
+    if (err instanceof BankBlockedError) throw new ToolError(err.message);
     if (err instanceof EnableBankingError && err.consentGone) {
       const session = store().data.sessions[account.session_id];
       if (session) store().update((d) => void (d.sessions[session.id]!.status = "EXPIRED"));
@@ -50,7 +53,7 @@ function guard<A extends unknown[]>(fn: (...args: A) => Promise<ReturnType<typeo
     try {
       return await fn(...args);
     } catch (err) {
-      if (err instanceof ToolError) return fail(err.message);
+      if (err instanceof ToolError || err instanceof BankBlockedError) return fail(err.message);
       if (err instanceof EnableBankingError) return fail(`Enable Banking returned ${err.status}: ${err.body.slice(0, 500)}`);
       return fail(`Error: ${(err as Error).message}`);
     }
@@ -179,23 +182,40 @@ export function registerTools(server: McpServer): void {
     {
       title: "List accounts",
       description:
-        "All linked accounts with bank, IBAN, currency and consent expiry. With include_balances the booked balance is fetched for each account (one bank call per account). Use the `booked` balance for totals; `available` may include credit lines.",
+        "All linked accounts with bank, IBAN, currency, consent expiry, and how far the stored transaction copy reaches (stored_from/stored_through, last_sync, bank_blocked_until). With include_balances the booked balance is fetched for each account (one bank call per account, counted against the bank's daily limit). Use the `booked` balance for totals; `available` may include credit lines.",
       inputSchema: { include_balances: z.boolean().default(false) },
     },
     guard(async ({ include_balances }) => {
       const s = store();
       const out = [];
       for (const a of s.accounts()) {
-        const base = describeAccount(a, s.data.sessions[a.session_id]);
+        const coverage = ledgerFor(a).coverage();
+        const base = {
+          ...describeAccount(a, s.data.sessions[a.session_id]),
+          stored_from: coverage.from ?? null,
+          stored_through: coverage.through ?? null,
+          stored_gap: coverage.gap ?? null,
+          last_sync: a.last_sync ?? null,
+          bank_blocked_until: blockedUntil(a) ?? null,
+          sync_error: a.sync_error ?? null,
+        };
         if (!include_balances) {
           out.push(base);
           continue;
         }
         try {
-          const b = simplifyBalances(await eb.getBalances(a.uid));
+          const b = simplifyBalances(await bankCall(a, () => eb.getBalances(a.uid)));
           out.push({ ...base, booked: b.booked, available: b.available, balance_date: b.reference_date });
         } catch (err) {
-          out.push({ ...base, balance_error: err instanceof EnableBankingError ? `${err.status}${err.consentGone ? " (consent expired, run start_consent)" : ""}` : String(err) });
+          out.push({
+            ...base,
+            balance_error:
+              err instanceof BankBlockedError
+                ? err.message
+                : err instanceof EnableBankingError
+                  ? `${err.status}${err.consentGone ? " (consent expired, run start_consent)" : ""}`
+                  : String(err),
+          });
         }
       }
       if (!out.length) return json({ accounts: [], hint: "No accounts linked yet. Use start_consent to connect a bank." });
@@ -240,52 +260,186 @@ export function registerTools(server: McpServer): void {
     {
       title: "Get transactions",
       description:
-        "Transactions of one account, newest first. Amounts are signed (negative = money out). Defaults to the last 30 days. Banks return limited history (often 90 days, some up to 2 years). If the result has `continuation`, pass it back to fetch more.",
+        "Booked transactions of one account, newest first (inside a day in the bank's order). Amounts are signed (negative = money out). " +
+        "Answers from the stored copy, which syncs about once a day and keeps history beyond the bank's 90 days; only goes to the bank when the stored copy does not cover the range. " +
+        "Filter with text, min_amount/max_amount (absolute values) and direction. Large results are paged with limit/offset; totals always cover every matching row. " +
+        "`coverage` says which days are stored; days outside it are missing, not empty.",
       inputSchema: {
         account: z.string().describe("Account uid or label"),
         from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("YYYY-MM-DD, default 30 days ago"),
         to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("YYYY-MM-DD, default today"),
-        continuation: z.string().optional().describe("Continuation key from a previous call"),
-        max_pages: z.number().int().min(1).max(50).default(10).describe("Pages to fetch in one call"),
-        include_raw: z.boolean().default(false).describe("Include the bank's raw transaction objects"),
+        text: z.string().optional().describe("Only rows whose counterparty, description, reference or IBAN contains this"),
+        min_amount: z.number().nonnegative().optional().describe("Only rows with |amount| at least this"),
+        max_amount: z.number().nonnegative().optional().describe("Only rows with |amount| at most this"),
+        direction: z.enum(["in", "out", "both"]).default("both"),
+        source: z.enum(["auto", "stored", "bank"]).default("auto").describe("auto: stored copy when it covers the range, else the bank. bank: force a bank call (uses one of the few daily calls)."),
+        include_pending: z.boolean().default(true).describe("Also list pending (not yet booked) items, separately"),
+        limit: z.number().int().min(1).max(2000).default(500),
+        offset: z.number().int().min(0).default(0),
       },
     },
-    guard(async ({ account, from, to, continuation, max_pages, include_raw }) =>
-      json(
-        await withAccount(account, async (a) => {
-          const dateFrom = from ?? daysAgo(30);
-          const dateTo = to ?? isoDate();
-          const all = [];
-          const raw = [];
-          let key = continuation;
-          let pages = 0;
-          do {
-            const pageData = await eb.getTransactionPage(a.uid, { dateFrom, dateTo, continuationKey: key });
-            for (const t of pageData.transactions) {
-              all.push(simplifyTransaction(t));
-              if (include_raw) raw.push(t);
-            }
-            key = pageData.continuation_key || undefined;
-            pages += 1;
-          } while (key && pages < max_pages);
-          all.sort((x, y) => (y.date > x.date ? 1 : y.date < x.date ? -1 : 0));
-          const inflow = all.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0);
-          const outflow = all.filter((t) => t.amount < 0).reduce((s, t) => s + t.amount, 0);
-          return {
-            account: a.label ?? a.name ?? a.uid,
-            uid: a.uid,
-            from: dateFrom,
-            to: dateTo,
-            count: all.length,
-            total_in: Math.round(inflow * 100) / 100,
-            total_out: Math.round(outflow * 100) / 100,
-            continuation: key,
-            transactions: all,
-            ...(include_raw ? { raw } : {}),
-          };
-        }),
-      ),
-    ),
+    guard(async ({ account, from, to, text, min_amount, max_amount, direction, source, include_pending, limit, offset }) => {
+      const a = resolveAccount(account);
+      const today = isoDate();
+      const dateFrom = from ?? daysAgo(30);
+      const dateTo = to && to < today ? to : today;
+      const notes: string[] = [];
+      let used: "stored" | "bank" = "stored";
+
+      const ledger = ledgerFor(a);
+      const fresh = !!a.last_sync && Date.now() - Date.parse(a.last_sync) < (config.syncIntervalHours + 1) * 3_600_000;
+      const through = ledger.coverage().through;
+      const storedEnough = ledger.covers(dateFrom, through && dateTo > through && fresh ? through : dateTo);
+      if (source === "bank" || (source === "auto" && !storedEnough)) {
+        const liveFrom = dateFrom > earliestFetchable(today) ? dateFrom : earliestFetchable(today);
+        if (liveFrom <= dateTo) {
+          try {
+            const raw = await withAccount(a.uid, (acc) => fetchAll(acc, liveFrom, dateTo));
+            storeFetch(a, raw, liveFrom, dateTo);
+            used = "bank";
+            if (liveFrom > dateFrom) notes.push(`The bank only returns data from ${liveFrom}; earlier days come from the stored copy.`);
+          } catch (err) {
+            if (!(err instanceof ToolError)) throw err;
+            notes.push(err.message);
+          }
+        } else {
+          notes.push(`The bank no longer returns data before ${earliestFetchable(today)}; this range comes from the stored copy only.`);
+        }
+      }
+
+      const current = ledgerFor(a);
+      const coverage = current.coverage();
+      if (!current.covers(dateFrom, dateTo)) {
+        notes.push(
+          coverage.from
+            ? `Stored data covers ${coverage.from} to ${coverage.through}${coverage.gap ? ` with a gap ${coverage.gap}` : ""}. Days outside that are missing, not empty. Older history can be added with import_statement.`
+            : "Nothing is stored for this account yet.",
+        );
+      }
+      const rows = sortLedger(current.query({ from: dateFrom, to: dateTo, text, minAmount: min_amount, maxAmount: max_amount, direction: direction === "both" ? undefined : direction }));
+      const page = rows.slice(offset, offset + limit);
+      const pending = include_pending ? current.pendingIn(dateFrom, dateTo) : [];
+      return json({
+        account: a.label ?? a.name ?? a.uid,
+        uid: a.uid,
+        from: dateFrom,
+        to: dateTo,
+        source: used,
+        coverage: { ...coverage, bank_blocked_until: blockedUntil(a) ?? null },
+        count: rows.length,
+        ...totals(rows),
+        offset,
+        next_offset: offset + limit < rows.length ? offset + limit : null,
+        transactions: page.map(({ seq: _seq, ...t }) => t),
+        pending: pending.map(({ seq: _seq, ...t }) => t),
+        notes: notes.length ? notes : undefined,
+      });
+    }),
+  );
+
+  server.registerTool(
+    "summarize_transactions",
+    {
+      title: "Summarise transactions",
+      description: "Totals per month or per counterparty from the stored copy (no bank call). Good for 'how much came in per month' or 'who did we pay most'.",
+      inputSchema: {
+        account: z.string().describe("Account uid or label"),
+        from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        group_by: z.enum(["month", "counterparty"]).default("month"),
+        top: z.number().int().min(1).max(200).default(30).describe("For counterparty: how many groups to return, largest first"),
+      },
+    },
+    guard(async ({ account, from, to, group_by, top }) => {
+      const a = resolveAccount(account);
+      const ledger = ledgerFor(a);
+      const rows = ledger.query({ from, to });
+      const groups = new Map<string, { in: number; out: number; count: number }>();
+      for (const t of rows) {
+        const key = group_by === "month" ? t.date.slice(0, 7) : (t.counterparty ?? t.description ?? "unknown").slice(0, 80);
+        const g = groups.get(key) ?? { in: 0, out: 0, count: 0 };
+        if (t.amount > 0) g.in += t.amount;
+        else g.out += t.amount;
+        g.count += 1;
+        groups.set(key, g);
+      }
+      let list = [...groups.entries()].map(([key, g]) => ({ key, in: round2(g.in), out: round2(g.out), net: round2(g.in + g.out), count: g.count }));
+      list = group_by === "month" ? list.sort((x, y) => (x.key < y.key ? -1 : 1)) : list.sort((x, y) => Math.abs(y.net) - Math.abs(x.net)).slice(0, top);
+      const coverage = ledger.coverage();
+      return json({
+        account: a.label ?? a.name ?? a.uid,
+        from,
+        to,
+        group_by,
+        ...totals(rows),
+        count: rows.length,
+        groups: list,
+        coverage,
+        notes: ledger.covers(from, to) ? undefined : [`Stored data covers ${coverage.from ?? "nothing"} to ${coverage.through ?? ""}; totals leave out days outside that.`],
+      });
+    }),
+  );
+
+  server.registerTool(
+    "sync_account",
+    {
+      title: "Sync an account now",
+      description:
+        "Fetch the latest transactions from the bank into the stored copy right away instead of waiting for the daily sync. Uses one of the few bank calls allowed per day; use only when the user needs today's bookings.",
+      inputSchema: { account: z.string().describe("Account uid or label") },
+    },
+    guard(async ({ account }) => {
+      const a = resolveAccount(account);
+      const result = await withAccount(a.uid, (acc) => syncAccount(acc));
+      return json({ account: a.label ?? a.name ?? a.uid, ...result, coverage: ledgerFor(a).coverage() });
+    }),
+  );
+
+  server.registerTool(
+    "import_statement",
+    {
+      title: "Import a bank statement",
+      description:
+        "Add older history the bank no longer returns, from a CSV statement export (German, Greek and English column names are recognised, e.g. Buchungstag/Betrag/Verwendungszweck). " +
+        "Only rows before the first day of the bank-synced data are accepted, so the two never overlap. Importing the same period again replaces it.",
+      inputSchema: {
+        account: z.string().describe("Account uid or label"),
+        csv: z.string().min(10).max(8_000_000).describe("The full CSV text of the export"),
+        columns: z
+          .object({
+            date: z.string().optional(),
+            amount: z.string().optional(),
+            counterparty: z.string().optional(),
+            description: z.string().optional(),
+            iban: z.string().optional(),
+            balance: z.string().optional(),
+            value_date: z.string().optional(),
+            debit_credit: z.string().optional(),
+          })
+          .optional()
+          .describe("Header names, only if the automatic detection fails"),
+        dry_run: z.boolean().default(false).describe("Parse and report without storing"),
+      },
+    },
+    guard(async ({ account, csv, columns, dry_run }) => {
+      const a = resolveAccount(account);
+      let rows;
+      try {
+        rows = rowsFromCsv(csv, a.currency, columns ?? {});
+      } catch (err) {
+        throw new ToolError((err as Error).message);
+      }
+      if (!rows.length) throw new ToolError("The file has a header but no rows.");
+      const dates = rows.map((r) => r.date).sort();
+      const summary = { rows: rows.length, from: dates[0], to: dates[dates.length - 1], ...totals(rows) };
+      if (dry_run) return json({ dry_run: true, ...summary, sample: rows.slice(0, 5) });
+      try {
+        const result = ledgerFor(a).importRows(rows);
+        return json({ ok: true, ...summary, ...result, coverage: ledgerFor(a).coverage() });
+      } catch (err) {
+        throw new ToolError((err as Error).message);
+      }
+    }),
   );
 
   // --- Watches ---

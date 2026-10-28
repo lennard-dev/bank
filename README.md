@@ -21,8 +21,8 @@ Claude ──OAuth──▶ your BankMCP™ server ──JWT──▶ Enable Ban
 - **Claude** talks to your server as a custom connector. You sign in once with
   a password; tokens handle the rest.
 - **Your server** holds the Enable Banking application key, the bank consents
-  and your account ids. It never stores balances or transactions and sends no
-  telemetry.
+  and your account ids, plus a copy of each account's transactions on its own
+  volume (see *Stored transactions* below). It sends no telemetry.
 - **Enable Banking** is the licensed provider. You log in at your bank's own
   site to approve access; nobody sees your bank credentials.
 
@@ -159,7 +159,10 @@ service to others. This project does not change those terms.
 | `list_banks`, `start_consent`, `consent_status`, `disconnect_bank` | connect and manage banks |
 | `list_accounts`, `set_account_label` | accounts with booked balances; your own names for them |
 | `get_balances` | booked and available balance for one account |
-| `get_transactions` | signed amounts, one counterparty, one description; paginated |
+| `get_transactions` | signed amounts, one counterparty, one description; filters, paging; answers from the stored copy |
+| `summarize_transactions` | totals per month or per counterparty, from the stored copy |
+| `sync_account` | fetch the latest bookings right away (uses one of the daily bank calls) |
+| `import_statement` | add history older than the bank returns, from a CSV statement export |
 | `create_watch`, `list_watches`, `delete_watch`, `check_watches` | background rules with webhook notifications |
 
 **Prompts**: `connect-bank`, `monthly-summary`, `build-budget`,
@@ -173,6 +176,31 @@ Notifications go to `NOTIFY_WEBHOOK_URL` as a Slack message or a JSON POST.
 
 Enable Banking's own webhooks cover payment initiation only, so account data
 is polled. There is no way around that under PSD2.
+
+## Stored transactions
+
+Banks let a server read an account only about four times a day while you are
+not present, and most return no more than 90 days. Asking Claude a few
+questions in a row would use that up and then block the account for a day.
+So the server keeps a copy of each account's transactions on its volume
+(`/data/transactions`, one file per account) and syncs it about once a day
+(`SYNC_INTERVAL_HOURS`, default 24). Tools answer from the copy; they only go
+to the bank when the copy does not cover the asked range.
+
+- A sync re-fetches the last seven days and replaces them, so corrected or
+  back-dated bookings never end up twice.
+- When the bank answers "too many requests", the account is marked blocked
+  until the time the bank names (or 24 hours) and no further call is made
+  before then. Every tool says so and falls back to the copy.
+- Accounts with an active watch are synced by the watch checks, so the two
+  never add up beyond the daily allowance.
+- `import_statement` adds older history from your bank's CSV export. It only
+  accepts days before the synced data starts.
+- Every result carries `coverage`: days outside it are missing, not empty.
+
+Set `SYNC_ENABLED=false` to turn the background sync off. Disconnecting a
+bank does not delete its stored file; remove it from the volume if you want
+it gone.
 
 ## Claude Code plugin
 

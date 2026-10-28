@@ -1,6 +1,6 @@
-// The only state this server keeps: bank sessions and account ids, watches,
-// and the OAuth clients/tokens for the MCP connector. One JSON file, written
-// atomically. Transactions and balances are never stored.
+// Server state: bank sessions and account ids, watches, and the OAuth
+// clients/tokens for the MCP connector. One JSON file, written atomically.
+// Transactions live in a separate per-account file (see ledger.ts).
 import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { config } from "./config.ts";
@@ -29,6 +29,12 @@ export interface StoredAccount {
   /** Your own name for the account, e.g. "Joint expenses". */
   label?: string;
   last_polled?: string;
+  /** Last successful sync into the local transaction copy. */
+  last_sync?: string;
+  /** The bank refused further calls until this time (PSD2 limit). No call is made before it. */
+  blocked_until?: string;
+  /** Last sync problem, cleared by the next successful sync. */
+  sync_error?: string;
 }
 
 export interface PendingAuth {
@@ -196,6 +202,8 @@ export class Store {
           identification_hash: a.identification_hash,
           label: previous?.label,
           last_polled: previous?.last_polled,
+          last_sync: previous?.last_sync,
+          // A new consent is a fresh start at the bank, so an old block no longer applies.
         };
       }
       // Sessions that no longer own any account are dead weight.

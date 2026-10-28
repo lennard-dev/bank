@@ -48,6 +48,9 @@ export interface Transaction {
   transaction_date?: string;
   creditor?: { name?: string };
   debtor?: { name?: string };
+  creditor_account?: { iban?: string; other?: { identification?: string } };
+  debtor_account?: { iban?: string; other?: { identification?: string } };
+  reference_number?: string;
   remittance_information?: string[];
   bank_transaction_code?: { code?: string; sub_code?: string; description?: string };
   merchant_category_code?: string;
@@ -91,7 +94,23 @@ export class EnableBankingError extends Error {
   }
   /** True when the bank consent behind this call is no longer usable. */
   get consentGone(): boolean {
+    if (this.rateLimited) return false;
     return this.status === 401 || this.status === 403 || this.status === 410 || /session|consent|expired|revoked/i.test(this.body);
+  }
+  /**
+   * The bank refused because of the PSD2 limit on access without the account
+   * holder present (usually four calls a day). Retrying before the bank's
+   * stated time only extends the block.
+   */
+  get rateLimited(): boolean {
+    return this.status === 429 || /RATE_LIMIT|too many requests/i.test(this.body);
+  }
+  /** When the bank says access works again, as an ISO timestamp, if it says so. */
+  get retryAfter(): string | undefined {
+    if (!this.rateLimited) return undefined;
+    const iso = this.body.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?/g);
+    const future = (iso ?? []).map((s) => Date.parse(s.endsWith("Z") || /[+-]\d{2}:?\d{2}$/.test(s) ? s : `${s}Z`)).filter((t) => !Number.isNaN(t) && t > Date.now());
+    return future.length ? new Date(Math.max(...future)).toISOString() : undefined;
   }
 }
 

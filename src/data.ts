@@ -16,12 +16,17 @@ export interface SimpleTransaction {
   status: string;
   balance_after?: number;
   merchant_category_code?: string;
+  /** IBAN (or other account id) of the other party, when the bank sends it. */
+  counterparty_iban?: string;
+  /** Payment reference (end-to-end / creditor reference), when the bank sends it. */
+  reference?: string;
 }
 
 export function simplifyTransaction(t: Transaction): SimpleTransaction {
   const signed = Number(t.transaction_amount.amount) * (t.credit_debit_indicator === "DBIT" ? -1 : 1);
   const counterparty = (t.credit_debit_indicator === "DBIT" ? t.creditor?.name : t.debtor?.name) || undefined;
   const description = [t.remittance_information?.join(" "), t.bank_transaction_code?.description, t.note].find((s) => s && s.trim()) || undefined;
+  const other = t.credit_debit_indicator === "DBIT" ? t.creditor_account : t.debtor_account;
   return {
     id: t.entry_reference || t.transaction_id || `${t.booking_date}:${signed}:${counterparty ?? ""}`,
     date: t.booking_date || t.value_date || t.transaction_date || "",
@@ -33,6 +38,8 @@ export function simplifyTransaction(t: Transaction): SimpleTransaction {
     status: t.status,
     balance_after: t.balance_after_transaction ? round2(Number(t.balance_after_transaction.amount)) : undefined,
     merchant_category_code: t.merchant_category_code,
+    counterparty_iban: other?.iban || other?.other?.identification || undefined,
+    reference: t.reference_number || undefined,
   };
 }
 

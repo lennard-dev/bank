@@ -156,7 +156,7 @@ app.get("/auth/google/callback", async (req, res) => {
 
 const bearer = requireBearerAuth({ verifier: provider, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(mcpUrl) });
 
-app.post("/mcp", bearer, express.json({ limit: "1mb" }), async (req, res) => {
+app.post("/mcp", bearer, express.json({ limit: "10mb" }), async (req, res) => {
   const server = createServer();
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   res.on("close", () => {
