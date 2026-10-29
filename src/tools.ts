@@ -272,7 +272,7 @@ export function registerTools(server: McpServer): void {
         min_amount: z.number().nonnegative().optional().describe("Only rows with |amount| at least this"),
         max_amount: z.number().nonnegative().optional().describe("Only rows with |amount| at most this"),
         direction: z.enum(["in", "out", "both"]).default("both"),
-        source: z.enum(["auto", "stored", "bank"]).default("auto").describe("auto: stored copy when it covers the range, else the bank. bank: force a bank call (uses one of the few daily calls)."),
+        source: z.enum(["auto", "stored", "bank"]).default("auto").describe("auto: stored copy when it covers the range, else the bank (never further back than about 90 days). bank: force one bank call for the whole range, also older history some banks still return (uses one of the few daily calls; if the bank refuses the period, it says so)."),
         include_pending: z.boolean().default(true).describe("Also list pending (not yet booked) items, separately"),
         limit: z.number().int().min(1).max(2000).default(500),
         offset: z.number().int().min(0).default(0),
@@ -291,7 +291,9 @@ export function registerTools(server: McpServer): void {
       const through = ledger.coverage().through;
       const storedEnough = ledger.covers(dateFrom, through && dateTo > through && fresh ? through : dateTo);
       if (source === "bank" || (source === "auto" && !storedEnough)) {
-        const liveFrom = dateFrom > earliestFetchable(today) ? dateFrom : earliestFetchable(today);
+        // auto stays within the usual ~90 days; a forced bank call asks for the whole range,
+        // because some banks (e.g. National Bank of Greece) return far more history.
+        const liveFrom = source === "bank" || dateFrom > earliestFetchable(today) ? dateFrom : earliestFetchable(today);
         if (liveFrom <= dateTo) {
           try {
             const raw = await withAccount(a.uid, (acc) => fetchAll(acc, liveFrom, dateTo));
